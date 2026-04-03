@@ -72,9 +72,20 @@ public class AzureVmService : IAzureVmService
         }
 
         _logger.LogInformation("Found {Count} subscriptions", subscriptions.Count);
+        var tasks = new List<Task<List<VmModel>>>();
+        using var subscriptionSemaphore = new SemaphoreSlim(_maxParallelOperations, _maxParallelOperations);
         foreach (var subscription in subscriptions)
         {
-            await foreach (var vmData in CollectVmDataFromSubscriptionAsync(subscription, timestamp, ct))
+            tasks.Add(CollectVmDataFromSubscriptionWithThrottleAsync(subscription, timestamp, subscriptionSemaphore, ct));
+        }
+
+        while (tasks.Count > 0)
+        {
+            var completedTask = await Task.WhenAny(tasks);
+            tasks.Remove(completedTask);
+
+            var subscriptionVmData = await completedTask;
+            foreach (var vmData in subscriptionVmData)
             {
                 currentBatch.Add(vmData);
                 if (currentBatch.Count < normalizedBatchSize)
@@ -93,11 +104,29 @@ public class AzureVmService : IAzureVmService
         }
     }
 
-    private async IAsyncEnumerable<VmModel> CollectVmDataFromSubscriptionAsync(
+    private async Task<List<VmModel>> CollectVmDataFromSubscriptionWithThrottleAsync(
         SubscriptionResource subscription,
         DateTime timestamp,
-        [EnumeratorCancellation] CancellationToken ct)
+        SemaphoreSlim semaphore,
+        CancellationToken ct)
     {
+        await semaphore.WaitAsync(ct);
+        try
+        {
+            return await CollectVmDataFromSubscriptionAsync(subscription, timestamp, ct);
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+
+    private async Task<List<VmModel>> CollectVmDataFromSubscriptionAsync(
+        SubscriptionResource subscription,
+        DateTime timestamp,
+        CancellationToken ct)
+    {
+        var vmDataList = new List<VmModel>();
         using var semaphore = new SemaphoreSlim(_maxParallelOperations, _maxParallelOperations);
         var tasks = new List<Task<List<VmModel>>>();
 
@@ -115,7 +144,7 @@ public class AzureVmService : IAzureVmService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error collecting VM data from subscription {SubscriptionId}", subscription.Id);
-            yield break;
+            return vmDataList;
         }
 
         while (tasks.Count > 0)
@@ -123,11 +152,10 @@ public class AzureVmService : IAzureVmService
             var completedTask = await Task.WhenAny(tasks);
             tasks.Remove(completedTask);
 
-            foreach (var vmData in await completedTask)
-            {
-                yield return vmData;
-            }
+            vmDataList.AddRange(await completedTask);
         }
+
+        return vmDataList;
     }
 
     private async Task<List<VmModel>> CollectVmDataFromResourceGroupWithThrottleAsync(
@@ -411,7 +439,9 @@ public class AzureVmService : IAzureVmService
             {
                 return await operation(ct);
             }
-            catch (RequestFailedException ex) when (ex.Status == 429 || ex.Status == 500 || ex.Status == 502 || ex.Status == 503 || ex.Status == 504 && attempt < _retryMaxAttempts)
+            catch (RequestFailedException ex)
+                when ((ex.Status == 429 || ex.Status == 500 || ex.Status == 502 || ex.Status == 503 || ex.Status == 504)
+                      && attempt < _retryMaxAttempts)
             {
                 var exponentialMs = _retryBaseDelayMs * Math.Pow(2, attempt - 1);
                 var jitterMs = Random.Shared.Next(100, 301);

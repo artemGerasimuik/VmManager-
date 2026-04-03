@@ -16,7 +16,6 @@ var vmOptions = builder.Configuration.GetSection(VMManagerOptions.SectionName).G
 var pollingIntervalMinutes = Math.Max(1, vmOptions.PollingIntervalMinutes);
     
 var ct = CancellationToken.None;
-ct.ThrowIfCancellationRequested();
 
 builder.Services.AddBllDependencies();
 
