@@ -1,42 +1,58 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using Quartz;
+using Microsoft.Extensions.Hosting;
 using VMManager.BLL.Configuration;
 using VMManager.BLL.Interfaces;
 using VMManager.BLL.Interfaces.Services;
 
 namespace VMManager.Console.Jobs;
 
-public class VmPollingJob(
+public sealed class VmPollingHostedService(
     IAzureVmService vmService,
     ICsvLogger csvLogger,
     IVmStartTimeTracker startTimeTracker,
     IOptions<VMManagerOptions> options,
-    ILogger<VmPollingJob> logger)
-    : IJob
+    ILogger<VmPollingHostedService> logger)
+    : BackgroundService
 {
-    public async Task Execute(IJobExecutionContext context)
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        try
+        var pollingInterval = TimeSpan.FromMinutes(Math.Max(1, options.Value.PollingIntervalMinutes));
+
+        while (!stoppingToken.IsCancellationRequested)
         {
-            logger.LogInformation("Starting VM polling cycle at {Timestamp}", DateTime.UtcNow);
-
-            var ct = context.CancellationToken;
-            ct.ThrowIfCancellationRequested();
-
-            var batchSize = Math.Max(1, options.Value.VmBatchSize);
-            await foreach (var vmBatch in vmService.StreamVmDataBatchesAsync(batchSize, ct))
+            try
             {
-                await csvLogger.LogVmDataAsync(vmBatch, ct);
-                await vmService.ApplyPowerManagementRulesAsync(vmBatch, ct);
+                logger.LogInformation("Starting VM polling cycle at {Timestamp}", DateTime.UtcNow);
+
+                var batchSize = Math.Max(1, options.Value.VmBatchSize);
+                await foreach (var vmBatch in vmService.StreamVmDataBatchesAsync(batchSize, stoppingToken))
+                {
+                    await csvLogger.LogVmDataAsync(vmBatch, stoppingToken);
+                    await vmService.ApplyPowerManagementRulesAsync(vmBatch, stoppingToken);
+                }
+                await startTimeTracker.SaveStartTimesAsync(stoppingToken);
+
+                logger.LogInformation("Completed VM polling cycle at {Timestamp}", DateTime.UtcNow);
             }
-            await startTimeTracker.SaveStartTimesAsync(ct);
-            
-            logger.LogInformation("Completed VM polling cycle at {Timestamp}", DateTime.UtcNow);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Error occurred during VM polling cycle");
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Error occurred during VM polling cycle");
+            }
+
+            try
+            {
+                await Task.Delay(pollingInterval, stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
         }
     }
 }
