@@ -2,12 +2,13 @@
 
 ## Purpose
 A .NET 10 console application that periodically manages and logs Azure VM state across all subscriptions in a tenant.  
-Target use case: automatic stop/deallocate for VMs with `AutoShutdown=1`, with append-only CSV audit logging.
+Target use case: automatic stop/deallocate for VMs with `Autoshutdown=1`, with append-only CSV audit logging.
 
 ## Key Features & Architecture
 
-- **Quartz Scheduler:**
-  - Uses Quartz.NET to run `VmPollingJob` on a fixed interval (`PollingIntervalMinutes` in config).
+- **Manual Scheduler (BackgroundService):**
+  - Uses a hosted background worker (`VmPollingHostedService`) with a configurable interval (`PollingIntervalMinutes`).
+  - The worker runs a polling cycle, then delays until the next cycle (`Task.Delay`) until the app is stopped.
 
 - **File Write Synchronization:**
   - CSV writes are protected by `SemaphoreSlim` to avoid concurrent file corruption.
@@ -52,7 +53,7 @@ Target use case: automatic stop/deallocate for VMs with `AutoShutdown=1`, with a
 1. Install [.NET 10 SDK](https://dotnet.microsoft.com/en-us/download/dotnet/10.0).
 2. Configure `VMManager.Console/appsettings.json`.
 3. Authenticate to Azure (e.g., `az login` or Managed Identity in cloud).
-4. Run the console app: `dotnet run --project VMManager.Console`.
+4. Run the console app: `dotnet run --project VMManager/VMManager.Console`.
 5. Review output files (CSV inventory log + JSON start-time state), stored by configured paths.
 
 ## Additional Notes
